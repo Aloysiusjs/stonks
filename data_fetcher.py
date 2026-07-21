@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 
 import yfinance as yf
 
+import analysis_config as acfg
+from earnings_engine import analyze as run_analysis
+
 log = logging.getLogger(__name__)
 
 
@@ -89,6 +92,18 @@ def fetch_dashboard_data(symbol: str) -> dict:
     ex_div_date = _fmt_unix_date(_safe_get(info, "exDividendDate"))
     earnings_date = _next_earnings_date(ticker)
 
+    # ── Analysis add-on ──────────────────────────────────────────────
+    # Reuses the SAME `ticker` object above; yfinance caches .info on it,
+    # so no extra network round-trip for get_info(). Never let the analysis
+    # break the core price message — on any failure we attach None and the
+    # formatter simply omits the ANALYSIS block.
+    analysis = None
+    if acfg.ANALYSIS_ENABLED:
+        try:
+            analysis = run_analysis(ticker, symbol)
+        except Exception as e:
+            log.error("[analysis] %s failed: %s", symbol, e)
+
     return {
         "symbol": symbol,
         "name": _safe_get(info, "shortName", "longName") or symbol,
@@ -112,5 +127,6 @@ def fetch_dashboard_data(symbol: str) -> dict:
         "div_yield": div_yield,
         "earnings_date": earnings_date,
         "ex_div_date": ex_div_date,
+        "analysis": analysis,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
