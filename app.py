@@ -13,7 +13,7 @@ from flask import Flask, request
 
 import config
 from data_fetcher import fetch_dashboard_data
-from formatter import format_dashboard
+from formatter import format_dashboard_messages
 from market_hours import session_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -24,6 +24,21 @@ app = Flask(__name__)
 TELEGRAM_API = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
 
 
+def _send_message(text: str) -> bool:
+    """Send one Telegram message. Plain text (no parse_mode) so that the
+    free-form LLM analysis text and company names containing _ * [ ] can't
+    trigger a 400 'can't parse entities' error."""
+    resp = requests.post(
+        TELEGRAM_API,
+        json={"chat_id": config.TELEGRAM_CHAT_ID, "text": text},
+        timeout=15,
+    )
+    if not resp.ok:
+        log.error("Telegram send failed: %s %s", resp.status_code, resp.text)
+        return False
+    return True
+
+
 def send_dashboard(session_label: str):
     rows = []
     for symbol in config.TICKERS:
@@ -31,21 +46,26 @@ def send_dashboard(session_label: str):
             rows.append(fetch_dashboard_data(symbol))
         except Exception as e:
             log.error("Failed to fetch %s: %s", symbol, e)
+
     if not rows:
         log.warning("No data fetched, skipping send.")
         return False
 
-    text = format_dashboard(session_label, rows)
-    resp = requests.post(
-        TELEGRAM_API,
-        json={"chat_id": config.TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
-        timeout=15,
-    )
-    if not resp.ok:
-        log.error("Telegram send failed: %s %s", resp.status_code, resp.text)
-        return False
-    log.info("%s dashboard sent.", session_label)
-    return True
+    # With the analysis add-on on, this returns one message per ticker so each
+    # stays under Telegram's 4096-char cap. With ANALYSIS_ENABLED=0 it returns
+    # a single combined message. Either way we loop and send each.
+    messages = format_dashboard_messages(session_label, rows)
+
+    all_ok = True
+    for text in messages:
+        if not _send_message(text):
+            all_ok = False
+
+    if all_ok:
+        log.info("%s dashboard sent (%d message(s)).", session_label, len(messages))
+    else:
+        log.error("%s dashboard: one or more messages failed to send.", session_label)
+    return all_ok
 
 
 @app.get("/")
@@ -59,11 +79,9 @@ def health():
 def trigger():
     key = request.args.get("key")
     session = request.args.get("session")  # 'open' or 'close'
-
     if key != config.TRIGGER_SECRET:
         log.warning("Rejected trigger: bad secret.")
         return {"error": "forbidden"}, 403
-
     if session not in ("open", "close"):
         return {"error": "session must be 'open' or 'close'"}, 400
 
