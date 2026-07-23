@@ -86,6 +86,12 @@ def main(argv=None) -> int:
         choices=["open", "close", "warm"],
         help="Which session to fire. 'warm' is a no-op kept for schedule symmetry.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the market-window/trading-day gate and send now. For manual "
+             "testing outside market hours — never used by the scheduled crons.",
+    )
     args = parser.parse_args(argv)
     session = args.session
 
@@ -95,13 +101,16 @@ def main(argv=None) -> int:
         log.info("warm: no-op (nothing to pre-warm on the runner).")
         return 0
 
-    should_send, reason = session_status(session)
-    if not should_send:
-        # Not a trading day / outside the bell window is expected — not a failure.
-        log.info("Skipped %s: %s", session, reason)
-        return 0
+    if args.force:
+        log.warning("--force: bypassing session gate, sending %s now.", session)
+    else:
+        should_send, reason = session_status(session)
+        if not should_send:
+            # Not a trading day / outside the bell window is expected — not a failure.
+            log.info("Skipped %s: %s", session, reason)
+            return 0
+        log.info("%s session confirmed (%s).", session, reason)
 
-    log.info("%s session confirmed (%s).", session, reason)
     ok = send_dashboard(_LABELS[session])
     return 0 if ok else 1
 
