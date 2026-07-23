@@ -239,9 +239,12 @@ RECENT HEADLINES:
 """
 
 
+_EMPTY_QUALITATIVE = {"business_model": None, "segments": [], "moat_rivals": [],
+                      "top_disruptor": None, "catalysts": [], "biggest_risk": None}
+
+
 def generate_dashboard(name: str, description: str, headlines: list[str]) -> dict:
-    empty = {"business_model": None, "segments": [], "moat_rivals": [],
-             "top_disruptor": None, "catalysts": [], "biggest_risk": None}
+    empty = dict(_EMPTY_QUALITATIVE)
     try:
         client = _anthropic_client()
         prompt = (_DASHBOARD_PROMPT
@@ -300,6 +303,26 @@ def analyze(tkr, ticker: str) -> AnalysisResult:
     Returns a fully-populated AnalysisResult. Never raises for data gaps;
     missing pieces degrade to neutral/insufficient.
     """
+    # Cost guard: if Yahoo returned no .info at all (e.g. an IP block or a
+    # transient rate-limit yielded an empty dict), there's nothing to analyze.
+    # Bail out to a neutral result WITHOUT touching the Anthropic API —
+    # generate_dashboard() would otherwise fire a paid LLM call on empty input.
+    info = {}
+    try:
+        info = tkr.info or {}
+    except Exception:
+        info = {}
+    if not info:
+        fund = Fundamentals(revenue_yoy=None, free_cash_flow=None,
+                            debt_to_equity=None, yoy_growth_last_4q=[])
+        conv, breakdown = conviction(fund, 0.0, 0.0)
+        return AnalysisResult(
+            ticker=ticker, fundamentals=fund,
+            sentiment_level=0.0, sentiment_velocity=0.0, velocity_confident=False,
+            conviction=conv, breakdown=breakdown,
+            qualitative=dict(_EMPTY_QUALITATIVE), signal=signal_from(conv),
+        )
+
     fund = extract_fundamentals(tkr)
 
     # News for sentiment + dashboard grounding
@@ -323,11 +346,7 @@ def analyze(tkr, ticker: str) -> AnalysisResult:
 
     conv, breakdown = conviction(fund, level, velocity)
 
-    info = {}
-    try:
-        info = tkr.info or {}
-    except Exception:
-        pass
+    # info was already fetched (and confirmed non-empty) by the guard above.
     qualitative = generate_dashboard(
         name=info.get("longName") or ticker,
         description=info.get("longBusinessSummary") or "",

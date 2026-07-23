@@ -17,9 +17,10 @@ TICKERS = [t.strip().upper() for t in _require("TICKERS").split(",") if t.strip(
 EXCHANGE_TZ = os.getenv("EXCHANGE_TZ", "America/New_York")
 MARKET_CALENDAR = "XNYS"  # NYSE calendar, covers Nasdaq-listed names too for holiday purposes
 
-# Shared secret the external cron pinger must supply — without this, anyone
-# who finds your Render URL could spam your Telegram chat with API calls.
-TRIGGER_SECRET = _require("TRIGGER_SECRET")
+# Legacy: shared secret the old Render /trigger route required. The bot now runs
+# entirely on the GitHub Actions runner (see run.py) with no public endpoint, so
+# this is optional and unused — kept only so an old env that still sets it works.
+TRIGGER_SECRET = os.getenv("TRIGGER_SECRET")
 
 # How many minutes of slack to allow between "now" and the calendar's
 # open/close time before treating a ping as off-session and skipping it.

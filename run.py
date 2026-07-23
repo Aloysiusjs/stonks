@@ -1,15 +1,24 @@
+#!/usr/bin/env python3
 """
-Free-tier architecture: Render's free Web Services spin down after ~15min
-idle and don't run a persistent background scheduler. So instead of an
-internal APScheduler loop, this is a plain Flask app with an HTTP endpoint
-that an external free cron service (cron-job.org) hits twice a day, at
-market open and market close. Each hit is idempotent-ish and self-checks
-against the NYSE calendar before sending anything.
+run.py — GitHub Actions entrypoint for the stock dashboard bot.
+
+Replaces the Render/Flask deployment. Yahoo Finance IP-blocks Render's egress,
+so yfinance returns nothing there; GitHub's runner IPs are not blocked. All data
+fetching AND the Telegram send now run directly on the runner. There is no HTTP
+server anymore — the workflow invokes this once per session:
+
+    python run.py --session {open,close,warm}
+
+Session gating (NYSE calendar + bell-window check) is unchanged from the old
+/trigger route — see market_hours.session_status(). Exit code is 0 on a
+successful send OR a legitimately-skipped session (weekend/holiday/off-window),
+and non-zero only when a send actually fails, so a failed run is a real alert.
 """
+import argparse
 import logging
+import sys
 
 import requests
-from flask import Flask, request
 
 import config
 from data_fetcher import fetch_dashboard_data
@@ -18,8 +27,6 @@ from market_hours import session_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("stock_bot")
-
-app = Flask(__name__)
 
 TELEGRAM_API = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
 
@@ -39,7 +46,7 @@ def _send_message(text: str) -> bool:
     return True
 
 
-def send_dashboard(session_label: str):
+def send_dashboard(session_label: str) -> bool:
     rows = []
     for symbol in config.TICKERS:
         try:
@@ -68,33 +75,36 @@ def send_dashboard(session_label: str):
     return all_ok
 
 
-@app.get("/")
-def health():
-    # Render pings this to confirm the service is alive. Also the URL
-    # your keep-warm pinger (if you add one) should hit.
-    return {"status": "ok"}, 200
+_LABELS = {"open": "MARKET OPEN", "close": "MARKET CLOSE"}
 
 
-@app.get("/trigger")
-def trigger():
-    key = request.args.get("key")
-    session = request.args.get("session")  # 'open' or 'close'
-    if key != config.TRIGGER_SECRET:
-        log.warning("Rejected trigger: bad secret.")
-        return {"error": "forbidden"}, 403
-    if session not in ("open", "close"):
-        return {"error": "session must be 'open' or 'close'"}, 400
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Fetch and send the stock dashboard.")
+    parser.add_argument(
+        "--session",
+        required=True,
+        choices=["open", "close", "warm"],
+        help="Which session to fire. 'warm' is a no-op kept for schedule symmetry.",
+    )
+    args = parser.parse_args(argv)
+    session = args.session
+
+    # 'warm' only existed to pre-warm Render's cold start. A fresh runner has
+    # nothing to warm, so it's a successful no-op.
+    if session == "warm":
+        log.info("warm: no-op (nothing to pre-warm on the runner).")
+        return 0
 
     should_send, reason = session_status(session)
     if not should_send:
-        log.info("Skipped %s trigger: %s", session, reason)
-        return {"sent": False, "reason": reason}, 200
+        # Not a trading day / outside the bell window is expected — not a failure.
+        log.info("Skipped %s: %s", session, reason)
+        return 0
 
-    label = "MARKET OPEN" if session == "open" else "MARKET CLOSE"
-    sent = send_dashboard(label)
-    return {"sent": sent, "reason": reason}, 200
+    log.info("%s session confirmed (%s).", session, reason)
+    ok = send_dashboard(_LABELS[session])
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    # Local dev only. On Render, gunicorn runs this (see Procfile).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    sys.exit(main())
