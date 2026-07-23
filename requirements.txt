@@ -1,6 +1,12 @@
-requests==2.32.3
-yfinance==0.2.43
-pandas==2.2.2
+# yfinance tracks Yahoo's ever-changing private API, so an old exact pin rots and
+# silently returns empty (that was the N/A bug — 0.2.43 no longer works at all).
+# Modern yfinance reaches Yahoo via curl_cffi (browser-TLS impersonation) and
+# needs lxml to parse earnings dates / financials. Keep it reasonably current;
+# bump the floor if Yahoo changes break fetching again.
+requests>=2.32
+yfinance>=1.5.1,<2
+lxml>=5
+pandas>=2.2,<3               # <3 keeps pandas-market-calendars 4.x compatible
 pandas-market-calendars==4.4.1
 python-dotenv==1.0.1
 pytz==2024.1
