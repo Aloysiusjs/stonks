@@ -1,18 +1,16 @@
 name: Stock dashboard triggers
 
-# Replaces cron-job.org entirely.
-#
-# Why: cron-job.org caps request timeout at 30s, but a Render free-tier cold
-# start takes ~47s. Every ping was abandoned mid-boot, producing 429 /
-# 503 no-server errors. GitHub Actions has no such cap, so a single request
-# can both wake the service AND wait for the real response.
+# Runs the ENTIRE bot on the GitHub Actions runner: fetch (yfinance) → format →
+# earnings analysis → Telegram send. Render is gone. Yahoo IP-blocks Render's
+# egress but not GitHub's runners, so fetching here is what actually returns
+# data instead of a dashboard full of N/A.
 #
 # IMPORTANT: GitHub Actions cron is UTC ONLY and does not observe DST.
 # Times below are set for EDT (UTC-4, ~Mar-Nov).
 # When the US returns to EST (UTC-5, ~Nov-Mar), add 1 hour to each UTC time:
 #   open  warm 14:15  trigger 14:25
 #   close warm 20:45  trigger 20:55
-# Your app's own session_status() window check is the safety net either way.
+# run.py's own session_status() window check is the safety net either way.
 
 on:
   schedule:
@@ -28,9 +26,9 @@ on:
   workflow_dispatch:
     inputs:
       session:
-        description: 'Manually fire a session trigger'
+        description: 'Manually fire a session'
         required: true
-        default: 'warm'
+        default: 'open'
         type: choice
         options: [warm, open, close]
 
@@ -60,35 +58,32 @@ jobs:
             esac
           fi
 
-      - name: Wake service (health check, retried through cold start)
-        run: |
-          # Render cold start ~47s. Retry up to ~3 min before giving up.
-          for attempt in 1 2 3 4 5 6; do
-            code=$(curl -sS -o /tmp/body -w '%{http_code}' -m 90 -L \
-                     https://stronks.onrender.com/ || echo 000)
-            echo "attempt $attempt -> HTTP $code"
-            if [ "$code" = "200" ]; then
-              cat /tmp/body; echo
-              exit 0
-            fi
-            sleep 20
-          done
-          echo "Service did not become healthy in time."
-          exit 1
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Fire session trigger
-        if: steps.pick.outputs.mode != 'warm'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run dashboard
         env:
-          SECRET: ${{ secrets.TRIGGER_SECRET }}
           MODE: ${{ steps.pick.outputs.mode }}
-        run: |
-          # Service is already warm from the previous step, so this is fast.
-          code=$(curl -sS -o /tmp/resp -w '%{http_code}' -m 120 -L \
-                   "https://stronks.onrender.com/trigger?session=${MODE}&key=${SECRET}")
-          echo "trigger HTTP $code"
-          cat /tmp/resp; echo
-          # Non-2xx should fail the run so you get a GitHub notification.
-          case "$code" in
-            2*) ;;
-            *) exit 1 ;;
-          esac
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TICKERS: ${{ secrets.TICKERS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Defaults to on; set repo variable ANALYSIS_ENABLED=0 to ship the base bot.
+          ANALYSIS_ENABLED: ${{ vars.ANALYSIS_ENABLED || '1' }}
+          # Optional overrides — set these as repo Variables only to change the
+          # defaults baked into config.py. The '||' fallback matters: a bare
+          # passthrough of an unset var sends "", and int("") would crash run.py.
+          EXCHANGE_TZ: ${{ vars.EXCHANGE_TZ || 'America/New_York' }}
+          SESSION_WINDOW_MIN: ${{ vars.SESSION_WINDOW_MIN || '20' }}
+        # run.py exits 0 on a successful send or a legitimately-skipped session,
+        # and non-zero only on a real send failure — so a failed run is a true alert.
+        run: python run.py --session "${MODE}"

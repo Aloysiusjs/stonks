@@ -43,8 +43,9 @@ def _ticker_block(d: dict) -> str:
         f"Earnings Date: {d['earnings_date'] or 'N/A'}",
         f"Ex-Div Date: {d['ex_div_date'] or 'N/A'}",
     ]
-    # Append the analysis block if present. render_analysis() already includes
-    # the regulatory disclaimer, so it is NOT added separately here.
+    # Append the analysis block if present. The regulatory disclaimer is added
+    # once per dashboard in format_dashboard_messages(), NOT here — so it shows
+    # even when the analysis add-on is off.
     res = d.get("analysis")
     if res is not None:
         lines.append(render_analysis(res))
@@ -79,14 +80,21 @@ def format_dashboard_messages(session_label: str, rows: list[dict]) -> list[str]
     header = f"*{session_label} DASHBOARD*\n{'_' * 28}"
 
     if not acfg.ANALYSIS_ENABLED:
-        return [format_dashboard(session_label, rows)]
+        messages = [format_dashboard(session_label, rows)]
+    else:
+        messages = []
+        for i, d in enumerate(rows):
+            block = _ticker_block(d)
+            block = f"{header}\n\n{block}" if i == 0 else block
+            # Hard safety: if a single block still exceeds the cap, split on lines.
+            messages.extend(_split_if_needed(block))
 
-    messages = []
-    for i, d in enumerate(rows):
-        block = _ticker_block(d)
-        block = f"{header}\n\n{block}" if i == 0 else block
-        # Hard safety: if a single block still exceeds the cap, split on lines.
-        messages.extend(_split_if_needed(block))
+    # Regulatory disclaimer must appear on every dashboard, regardless of whether
+    # the analysis add-on is on (render_analysis no longer carries it). Append it
+    # once to the final message. It's short (~45 chars) and _split_if_needed
+    # leaves >90 chars of headroom under Telegram's cap, so this can't overflow.
+    if messages:
+        messages[-1] = f"{messages[-1]}\n\n{acfg.DISCLAIMER}"
     return messages
 
 

@@ -3,11 +3,11 @@ formatter_analysis.py — renders an AnalysisResult into a Telegram message
 section. Import this from your existing formatter.py and append the returned
 block to each ticker's message.
 
-Every rendered block ends with the mandatory regulatory disclaimer.
+The regulatory disclaimer is NOT added here — formatter.format_dashboard_messages()
+appends it once per dashboard so it also shows when this add-on is disabled.
 """
 from __future__ import annotations
 
-import analysis_config as cfg
 from earnings_engine import AnalysisResult
 
 _TAG = {"REAL": "🟢", "HYPE": "🟡", "PRICED-IN": "🔵"}
@@ -72,8 +72,6 @@ def render(res: AnalysisResult) -> str:
         f"  fund {b['fundamental']} · sent-lvl {b['sentiment_level']} · "
         f"sent-vel {b['sentiment_velocity']}{vel_note}",
         f"  Biggest risk: {q.get('biggest_risk') or 'n/a'}",
-        "",
-        cfg.DISCLAIMER,
     ]
     return "\n".join(lines)
 
