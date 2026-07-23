@@ -31,6 +31,11 @@ on:
         default: 'open'
         type: choice
         options: [warm, open, close]
+      force:
+        description: 'Bypass the market-window gate (send now, for testing)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: dashboard-trigger
@@ -73,6 +78,9 @@ jobs:
       - name: Run dashboard
         env:
           MODE: ${{ steps.pick.outputs.mode }}
+          # Only set true by a manual dispatch with the 'force' box ticked;
+          # empty for scheduled runs, so crons always respect the gate.
+          FORCE: ${{ github.event.inputs.force }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TICKERS: ${{ secrets.TICKERS }}
@@ -86,4 +94,7 @@ jobs:
           SESSION_WINDOW_MIN: ${{ vars.SESSION_WINDOW_MIN || '20' }}
         # run.py exits 0 on a successful send or a legitimately-skipped session,
         # and non-zero only on a real send failure — so a failed run is a true alert.
-        run: python run.py --session "${MODE}"
+        run: |
+          FORCE_FLAG=""
+          if [ "${FORCE}" = "true" ]; then FORCE_FLAG="--force"; fi
+          python run.py --session "${MODE}" ${FORCE_FLAG}
