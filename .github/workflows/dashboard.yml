@@ -1,0 +1,94 @@
+name: Stock dashboard triggers
+
+# Replaces cron-job.org entirely.
+#
+# Why: cron-job.org caps request timeout at 30s, but a Render free-tier cold
+# start takes ~47s. Every ping was abandoned mid-boot, producing 429 /
+# 503 no-server errors. GitHub Actions has no such cap, so a single request
+# can both wake the service AND wait for the real response.
+#
+# IMPORTANT: GitHub Actions cron is UTC ONLY and does not observe DST.
+# Times below are set for EDT (UTC-4, ~Mar-Nov).
+# When the US returns to EST (UTC-5, ~Nov-Mar), add 1 hour to each UTC time:
+#   open  warm 14:15  trigger 14:25
+#   close warm 20:45  trigger 20:55
+# Your app's own session_status() window check is the safety net either way.
+
+on:
+  schedule:
+    # ---- EDT (summer) schedule ----
+    # Warm-up 10 min before open trigger: 13:15 UTC = 09:15 EDT
+    - cron: '15 13 * * 1-5'
+    # Open trigger: 13:25 UTC = 09:25 EDT
+    - cron: '25 13 * * 1-5'
+    # Warm-up 10 min before close trigger: 19:45 UTC = 15:45 EDT
+    - cron: '45 19 * * 1-5'
+    # Close trigger: 19:55 UTC = 15:55 EDT
+    - cron: '55 19 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      session:
+        description: 'Manually fire a session trigger'
+        required: true
+        default: 'warm'
+        type: choice
+        options: [warm, open, close]
+
+concurrency:
+  group: dashboard-trigger
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Decide action from schedule
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          CRON: ${{ github.event.schedule }}
+          MANUAL: ${{ github.event.inputs.session }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "mode=$MANUAL" >> "$GITHUB_OUTPUT"
+          else
+            case "$CRON" in
+              '25 13 * * 1-5') echo "mode=open"  >> "$GITHUB_OUTPUT" ;;
+              '55 19 * * 1-5') echo "mode=close" >> "$GITHUB_OUTPUT" ;;
+              *)               echo "mode=warm"  >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+      - name: Wake service (health check, retried through cold start)
+        run: |
+          # Render cold start ~47s. Retry up to ~3 min before giving up.
+          for attempt in 1 2 3 4 5 6; do
+            code=$(curl -sS -o /tmp/body -w '%{http_code}' -m 90 -L \
+                     https://stronks.onrender.com/ || echo 000)
+            echo "attempt $attempt -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              cat /tmp/body; echo
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "Service did not become healthy in time."
+          exit 1
+
+      - name: Fire session trigger
+        if: steps.pick.outputs.mode != 'warm'
+        env:
+          SECRET: ${{ secrets.TRIGGER_SECRET }}
+          MODE: ${{ steps.pick.outputs.mode }}
+        run: |
+          # Service is already warm from the previous step, so this is fast.
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' -m 120 -L \
+                   "https://stronks.onrender.com/trigger?session=${MODE}&key=${SECRET}")
+          echo "trigger HTTP $code"
+          cat /tmp/resp; echo
+          # Non-2xx should fail the run so you get a GitHub notification.
+          case "$code" in
+            2*) ;;
+            *) exit 1 ;;
+          esac
